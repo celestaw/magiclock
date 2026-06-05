@@ -1,0 +1,45 @@
+# Unity generated
+My project/[Ll]ibrary/
+My project/[Tt]emp/
+My project/[Oo]bj/
+My project/[Bb]uild/
+My project/[Bb]uilds/
+My project/[Ll]ogs/
+My project/[Uu]serSettings/
+My project/[Mm]emoryCaptures/
+My project/[Rr]ecordings/
+
+# IDE
+.vsconfig
+.vs/
+*.csproj
+*.slnx
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Builds
+*.apk
+*.aab
+*.unitypackage
+*.app
+
+# Crashlytics
+crashlytics-build.properties
+
+# Asset Store
+My project/Assets/AssetStoreTools*
