@@ -20,6 +20,7 @@ public class RuntimeNote
     public double startTime; // 出現（秒）
     public double hitTime;   // 叩く（秒）
     public MagicCircleView view;
+    public SlashView slashView;
     public bool spawned;
     public bool resolved;
 }
@@ -48,7 +49,7 @@ public class GameManager : MonoBehaviour
 
     [Header("演出オフセット（拍）")]
     [Tooltip("0なら完成＝叩く。1なら完成の1拍後に叩く。判定には影響しない描画専用。")]
-    public double hitOffsetBeats = 1.0;
+    public double hitOffsetBeats = 0.0;
 
     readonly List<RuntimeNote> notes = new List<RuntimeNote>();
     readonly List<JudgeEvent> events = new List<JudgeEvent>();
@@ -70,6 +71,7 @@ public class GameManager : MonoBehaviour
 
         conductor.bpm = chart.bpm;
         conductor.firstBeatOffset = chart.firstBeatOffset;
+        conductor.BuildTempoMap(chart.bpm, chart.bpmChanges, chart.timeSignatures);
 
         BuildNotes();
         BuildEvents();
@@ -123,18 +125,32 @@ public class GameManager : MonoBehaviour
 
             if (!rn.spawned && t >= rn.startTime)
             {
-                rn.view = pool.Get();
-                rn.view.Setup(rn.data.shape, new Vector3(rn.data.x, rn.data.y, 0f));
+                Vector3 pos = new Vector3(rn.data.x, rn.data.y, 0f);
+                if (rn.data.noteType == NoteType.Slash)
+                {
+                    rn.slashView = pool.GetSlash();
+                    rn.slashView.Setup(pos, rn.data.scale, rn.data.slashAngle, (float)rn.data.leadBeat);
+                }
+                else
+                {
+                    rn.view = pool.Get();
+                    rn.view.Setup(rn.data.shape, pos, rn.data.scale);
+                }
                 rn.spawned = true;
             }
 
-            if (rn.spawned && rn.view != null)
+            if (rn.spawned)
             {
                 // 完成時刻 = hitTime - visualOffset。各ノーツ独立にprogressを進める。
                 double visualEnd = rn.hitTime - visualOffset;
                 double lead = visualEnd - rn.startTime;
                 float p = lead > 0 ? (float)((t - rn.startTime) / lead) : 1f;
-                rn.view.UpdateVisual(Mathf.Clamp01(p));
+                p = Mathf.Clamp01(p);
+
+                if (rn.data.noteType == NoteType.Slash && rn.slashView != null)
+                    rn.slashView.UpdateVisual(p);
+                else if (rn.view != null)
+                    rn.view.UpdateVisual(p);
             }
         }
 
@@ -200,6 +216,11 @@ public class GameManager : MonoBehaviour
             {
                 pool.Return(rn.view);
                 rn.view = null;
+            }
+            if (rn.slashView != null)
+            {
+                pool.Return(rn.slashView);
+                rn.slashView = null;
             }
         }
 

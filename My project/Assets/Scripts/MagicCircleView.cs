@@ -21,17 +21,18 @@ public class MagicCircleView : MonoBehaviour
         circlePoints = new Vector2[n + 1];
         for (int i = 0; i <= n; i++)
         {
-            float a = Mathf.PI * 2f * i / n;
+            float a = Mathf.PI * 0.5f - Mathf.PI * 2f * i / n;
             circlePoints[i] = new Vector2(Mathf.Cos(a), Mathf.Sin(a));
         }
     }
 
-    public void Setup(ShapeType shape, Vector3 worldPos)
+    public void Setup(ShapeType shape, Vector3 worldPos, float scale = 1f)
     {
         EnsureCircle();
         transform.position = worldPos;
-        ringDrawer.SetShape(circlePoints, radius);
-        shapeDrawer.SetShape(ShapeLibrary.Get(shape), radius);
+        float r = radius * scale;
+        ringDrawer.SetShape(circlePoints, r);
+        shapeDrawer.SetShape(ShapeLibrary.Get(shape), r);
         UpdateVisual(0f);
         gameObject.SetActive(true);
     }

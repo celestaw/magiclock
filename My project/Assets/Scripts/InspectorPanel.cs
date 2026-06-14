@@ -6,8 +6,12 @@ public class InspectorPanel : MonoBehaviour
     public ChartEditorManager manager;
     RectTransform panelRect;
 
-    InputField hitBeatInput, leadBeatInput, xInput, yInput;
+    InputField hitBeatInput, leadBeatInput, xInput, yInput, scaleInput, slashAngleInput;
     Button[] shapeButtons;
+    Text shapeLabel;
+    Text slashAngleLabel;
+    Button[] noteTypeButtons;
+    Text noteTypeLabel;
     Button deleteButton;
     Text noSelLabel;
 
@@ -15,6 +19,11 @@ public class InspectorPanel : MonoBehaviour
     Text tsLabel;
     InputField tsNumeratorInput;
     Dropdown tsDenominatorDropdown;
+
+    // BPM UI
+    Text bpmLabel;
+    InputField bpmInput;
+    Button bpmRemoveButton;
 
     // Quantize UI
     Button quantizeToggle;
@@ -45,10 +54,13 @@ public class InspectorPanel : MonoBehaviour
         BuildUI();
         manager.OnSelectionChanged += Refresh;
         manager.OnCurrentBeatChanged += RefreshTimeSignature;
+        manager.OnCurrentBeatChanged += RefreshBpm;
         manager.OnTimeSignatureChanged += RefreshTimeSignature;
+        manager.OnBpmChanged += RefreshBpm;
         manager.OnQuantizeChanged += RefreshQuantizeUI;
         Refresh();
         RefreshTimeSignature();
+        RefreshBpm();
         RefreshQuantizeUI();
     }
 
@@ -75,6 +87,30 @@ public class InspectorPanel : MonoBehaviour
 
         MakeLabel("分母:", 12).GetComponent<RectTransform>().anchoredPosition = new Vector2(120, y);
         BuildDenominatorDropdown(y);
+        y -= 35;
+
+        // --- BPM section ---
+        MakeLabel("BPM:", 13).GetComponent<RectTransform>().anchoredPosition = new Vector2(10, y);
+        bpmLabel = MakeLabel("", 13);
+        bpmLabel.GetComponent<RectTransform>().anchoredPosition = new Vector2(60, y);
+        y -= 28;
+
+        MakeLabel("値:", 12).GetComponent<RectTransform>().anchoredPosition = new Vector2(10, y);
+        bpmInput = MakeInputField(y);
+        bpmInput.GetComponent<RectTransform>().anchoredPosition = new Vector2(60, y);
+        bpmInput.GetComponent<RectTransform>().sizeDelta = new Vector2(70, 25);
+        bpmInput.contentType = InputField.ContentType.DecimalNumber;
+        bpmInput.onEndEdit.AddListener(OnBpmEdited);
+
+        bpmRemoveButton = MakeButton("x", y, new Color(0.6f, 0.2f, 0.2f));
+        var bpmRemRt = bpmRemoveButton.GetComponent<RectTransform>();
+        bpmRemRt.anchoredPosition = new Vector2(140, y);
+        bpmRemRt.sizeDelta = new Vector2(25, 25);
+        bpmRemoveButton.onClick.AddListener(() =>
+        {
+            var mi = manager.GetCurrentMeasureInfo();
+            manager.RemoveBpmChange(mi.measure);
+        });
         y -= 35;
 
         // --- Quantize section ---
@@ -115,8 +151,28 @@ public class InspectorPanel : MonoBehaviour
         });
 
         y -= 35;
-        MakeLabel("図形:", 13).GetComponent<RectTransform>().anchoredPosition = new Vector2(10, y);
+        noteTypeLabel = MakeLabel("種別:", 13);
+        noteTypeLabel.GetComponent<RectTransform>().anchoredPosition = new Vector2(10, y);
+        BuildNoteTypeButtons(y);
+
+        y -= 35;
+        shapeLabel = MakeLabel("図形:", 13);
+        shapeLabel.GetComponent<RectTransform>().anchoredPosition = new Vector2(10, y);
         BuildShapeButtons(y);
+
+        y -= 35;
+        slashAngleLabel = MakeLabel("角度:", 13);
+        slashAngleLabel.GetComponent<RectTransform>().anchoredPosition = new Vector2(10, y);
+        slashAngleInput = MakeInputField(y);
+        slashAngleInput.contentType = InputField.ContentType.DecimalNumber;
+        slashAngleInput.onEndEdit.AddListener(v =>
+        {
+            if (manager.selectedNote != null && float.TryParse(v, out float f))
+            {
+                manager.selectedNote.slashAngle = f;
+                manager.NotifyNoteChanged();
+            }
+        });
 
         y -= 40;
         MakeLabel("x:", 13).GetComponent<RectTransform>().anchoredPosition = new Vector2(10, y);
@@ -142,11 +198,32 @@ public class InspectorPanel : MonoBehaviour
             }
         });
 
+        y -= 35;
+        MakeLabel("大きさ:", 13).GetComponent<RectTransform>().anchoredPosition = new Vector2(10, y);
+        scaleInput = MakeInputField(y);
+        scaleInput.contentType = InputField.ContentType.DecimalNumber;
+        scaleInput.onEndEdit.AddListener(v =>
+        {
+            if (manager.selectedNote != null && float.TryParse(v, out float f))
+            {
+                manager.selectedNote.scale = Mathf.Max(0.1f, f);
+                manager.NotifyNoteChanged();
+            }
+        });
+
         y -= 45;
         deleteButton = MakeButton("Delete", y, new Color(0.8f, 0.2f, 0.2f));
         deleteButton.onClick.AddListener(() =>
         {
-            if (manager.selectedNote != null)
+            if (manager.selectedNotes.Count > 0)
+            {
+                var toDelete = new System.Collections.Generic.List<NoteData>(manager.selectedNotes);
+                foreach (var n in toDelete)
+                    manager.chart.notes.Remove(n);
+                manager.DeselectNote();
+                manager.NotifyNoteChanged();
+            }
+            else if (manager.selectedNote != null)
                 manager.DeleteNote(manager.selectedNote);
         });
     }
@@ -260,6 +337,59 @@ public class InspectorPanel : MonoBehaviour
 
         int idx = System.Array.IndexOf(QuantizeHelper.Divisions, manager.quantizeDivision);
         if (idx >= 0) quantizeDivDropdown.value = idx;
+    }
+
+    void BuildNoteTypeButtons(float y)
+    {
+        string[] labels = { "魔法陣", "斬撃" };
+        NoteType[] types = { NoteType.MagicCircle, NoteType.Slash };
+        noteTypeButtons = new Button[types.Length];
+        float btnW = 55f;
+        float startX = 60f;
+
+        for (int i = 0; i < types.Length; i++)
+        {
+            var go = new GameObject($"NoteTypeBtn_{types[i]}");
+            var rt = go.AddComponent<RectTransform>();
+            rt.SetParent(panelRect, false);
+            rt.anchorMin = rt.anchorMax = new Vector2(0, 1);
+            rt.pivot = new Vector2(0, 1);
+            rt.anchoredPosition = new Vector2(startX + i * (btnW + 2), y);
+            rt.sizeDelta = new Vector2(btnW, 25);
+
+            var img = go.AddComponent<Image>();
+            img.color = new Color(0.25f, 0.25f, 0.3f);
+
+            var btn = go.AddComponent<Button>();
+            btn.targetGraphic = img;
+
+            var lblGo = new GameObject("Lbl");
+            var lrt = lblGo.AddComponent<RectTransform>();
+            lrt.SetParent(rt, false);
+            lrt.anchorMin = Vector2.zero;
+            lrt.anchorMax = Vector2.one;
+            lrt.offsetMin = lrt.offsetMax = Vector2.zero;
+            var txt = lblGo.AddComponent<Text>();
+            txt.text = labels[i];
+            txt.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            txt.fontSize = 12;
+            txt.color = Color.white;
+            txt.alignment = TextAnchor.MiddleCenter;
+
+            int idx = i;
+            btn.onClick.AddListener(() =>
+            {
+                if (manager.selectedNote != null)
+                {
+                    manager.selectedNote.noteType = types[idx];
+                    if (types[idx] == NoteType.Slash && manager.selectedNote.slashAngle == 0f)
+                        manager.selectedNote.slashAngle = 45f;
+                    manager.NotifyNoteChanged();
+                }
+            });
+
+            noteTypeButtons[i] = btn;
+        }
     }
 
     void BuildShapeButtons(float y)
@@ -423,29 +553,97 @@ public class InspectorPanel : MonoBehaviour
         if (denomIdx >= 0) tsDenominatorDropdown.value = denomIdx;
     }
 
+    void OnBpmEdited(string _)
+    {
+        if (!float.TryParse(bpmInput.text, out float val) || val <= 0) return;
+        var mi = manager.GetCurrentMeasureInfo();
+        manager.SetBpmAtMeasure(mi.measure, val);
+    }
+
+    void RefreshBpm()
+    {
+        var mi = manager.GetCurrentMeasureInfo();
+        float currentBpm = manager.GetBpmAtBeat(mi.startBeat);
+        bpmLabel.text = $"小節{mi.measure + 1}: {currentBpm:F3}";
+        bpmInput.text = currentBpm.ToString("F3");
+
+        // 小節0はbaseBpmなので削除不可
+        bool hasChange = mi.measure > 0 &&
+            manager.chart.bpmChanges.Exists(c => System.Math.Abs(c.beat - mi.startBeat) < 0.001);
+        bpmRemoveButton.gameObject.SetActive(hasChange);
+    }
+
     void Refresh()
     {
         var note = manager.selectedNote;
+        int selCount = manager.selectedNotes.Count;
         bool has = note != null;
+        bool isMC = has && note.noteType == NoteType.MagicCircle;
+        bool isSlash = has && note.noteType == NoteType.Slash;
+        bool multi = selCount > 1;
+
         noSelLabel.gameObject.SetActive(!has);
+        if (!has)
+            noSelLabel.text = "No note selected";
+        else if (multi)
+            noSelLabel.gameObject.SetActive(true);
+
+        if (multi)
+            noSelLabel.text = $"{selCount} notes selected";
         hitBeatInput.gameObject.SetActive(has);
         leadBeatInput.gameObject.SetActive(has);
         xInput.gameObject.SetActive(has);
         yInput.gameObject.SetActive(has);
+        scaleInput.gameObject.SetActive(has);
         deleteButton.gameObject.SetActive(has);
 
+        // Note type buttons
+        noteTypeLabel.gameObject.SetActive(has);
+        if (noteTypeButtons != null)
+            foreach (var b in noteTypeButtons)
+                b.gameObject.SetActive(has);
+
+        // Shape buttons: MagicCircle only
+        shapeLabel.gameObject.SetActive(isMC);
         if (shapeButtons != null)
             foreach (var b in shapeButtons)
-                b.gameObject.SetActive(has);
+                b.gameObject.SetActive(isMC);
+
+        // Slash angle: Slash only
+        slashAngleLabel.gameObject.SetActive(isSlash);
+        slashAngleInput.gameObject.SetActive(isSlash);
 
         if (!has) return;
         hitBeatInput.text = note.hitBeat.ToString("F2");
         leadBeatInput.text = note.leadBeat.ToString("F2");
         xInput.text = note.x.ToString("F2");
         yInput.text = note.y.ToString("F2");
+        scaleInput.text = note.scale.ToString("F2");
 
-        selectedShape = note.shape;
-        UpdateShapeButtonColors();
+        if (isSlash)
+            slashAngleInput.text = note.slashAngle.ToString("F1");
+
+        // Note type button highlight
+        UpdateNoteTypeButtonColors(note.noteType);
+
+        if (isMC)
+        {
+            selectedShape = note.shape;
+            UpdateShapeButtonColors();
+        }
+    }
+
+    void UpdateNoteTypeButtonColors(NoteType type)
+    {
+        if (noteTypeButtons == null) return;
+        NoteType[] types = { NoteType.MagicCircle, NoteType.Slash };
+        for (int i = 0; i < noteTypeButtons.Length; i++)
+        {
+            var img = noteTypeButtons[i].GetComponent<Image>();
+            img.color = (types[i] == type)
+                ? new Color(0.3f, 0.6f, 1f)
+                : new Color(0.25f, 0.25f, 0.3f);
+        }
     }
 
     Text MakeLabel(string text, int size)

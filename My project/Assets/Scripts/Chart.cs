@@ -1,6 +1,13 @@
 using System;
 using System.Collections.Generic;
 
+/// <summary>ノーツの種別。</summary>
+public enum NoteType
+{
+    MagicCircle, // 魔法陣（従来のノーツ）
+    Slash        // 斬撃（予告→攻撃の1拍ノーツ）
+}
+
 /// <summary>魔法陣の図形種類。ShapeLibraryで点列に変換される。</summary>
 public enum ShapeType
 {
@@ -18,11 +25,14 @@ public enum ShapeType
 [Serializable]
 public class NoteData
 {
-    public double hitBeat;   // 叩く拍
-    public double leadBeat;  // 可変長プリロール（拍）。出現拍 = hitBeat - leadBeat
-    public ShapeType shape;  // 描く図形
-    public float x;          // 出現位置（ワールド座標）
+    public NoteType noteType; // ノーツ種別（デフォルト: MagicCircle）
+    public double hitBeat;    // 叩く拍
+    public double leadBeat;   // 可変長プリロール（拍）。出現拍 = hitBeat - leadBeat
+    public ShapeType shape;   // 描く図形（MagicCircle用）
+    public float x;           // 出現位置（ワールド座標）
     public float y;
+    public float scale = 1f;  // 大きさ倍率（デフォルト1）
+    public float slashAngle;  // 斬撃の角度（度、Slash用。0=横、90=縦）
 }
 
 [Serializable]
@@ -41,11 +51,27 @@ public class TimeSignatureChange
     }
 }
 
+/// <summary>BPM変更イベント。指定拍からBPMが変わる。</summary>
+[Serializable]
+public class BpmChange
+{
+    public double beat;  // この拍からBPMが変わる
+    public float bpm;    // 新しいBPM
+
+    public BpmChange() { }
+    public BpmChange(double beat, float bpm)
+    {
+        this.beat = beat;
+        this.bpm = bpm;
+    }
+}
+
 [Serializable]
 public class AudioTrackData
 {
     public double startBeat;
     public string fileName;
+    public string filePath; // フルパス（再ロード用）
     public double durationBeats;
 }
 
@@ -61,4 +87,5 @@ public class Chart
     {
         new TimeSignatureChange(0, 4, 4)
     };
+    public List<BpmChange> bpmChanges = new List<BpmChange>();
 }

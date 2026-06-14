@@ -22,6 +22,10 @@ public class TimelinePanel : MonoBehaviour
     // Cursor: lives under viewport (not content) so it stays visible while scrolling
     RectTransform cursorLine;
 
+    /// <summary>true: カーソル固定でタイムラインが動く。false: タイムラインが固定でカーソルが動く。</summary>
+    public bool cursorLocked;
+    const float lockedCursorRatio = 0.1f; // 固定時のカーソル位置（左端から10%）
+
     public void Init(ChartEditorManager mgr, RectTransform parent)
     {
         manager = mgr;
@@ -100,6 +104,30 @@ public class TimelinePanel : MonoBehaviour
         var mouse = Mouse.current;
         if (kb == null || mouse == null) return;
 
+        // Ctrl+C / Ctrl+X / Ctrl+V
+        if (kb.ctrlKey.isPressed)
+        {
+            if (kb.cKey.wasPressedThisFrame)
+                manager.CopySelection();
+            else if (kb.xKey.wasPressedThisFrame)
+                manager.CutSelection();
+            else if (kb.vKey.wasPressedThisFrame)
+                manager.Paste();
+        }
+
+        // Delete / Backspace: delete selected notes
+        if (kb.deleteKey.wasPressedThisFrame || kb.backspaceKey.wasPressedThisFrame)
+        {
+            if (manager.selectedNotes.Count > 0)
+            {
+                var toDelete = new List<NoteData>(manager.selectedNotes);
+                foreach (var n in toDelete)
+                    manager.chart.notes.Remove(n);
+                manager.DeselectNote();
+                manager.NotifyNoteChanged();
+            }
+        }
+
         float scrollY = mouse.scroll.ReadValue().y;
         if (scrollY == 0) return;
 
@@ -111,11 +139,14 @@ public class TimelinePanel : MonoBehaviour
             beatWidth = Mathf.Clamp(beatWidth * factor, minBeatWidth, maxBeatWidth);
 
             // Keep currentBeat at same viewport position after zoom
-            float cursorViewX = (float)manager.currentBeat * oldBeatWidth + content.anchoredPosition.x;
-            float newContentX = cursorViewX - (float)manager.currentBeat * beatWidth;
-            content.anchoredPosition = new Vector2(
-                Mathf.Clamp(newContentX, -(content.sizeDelta.x - viewport.rect.width), 0),
-                content.anchoredPosition.y);
+            if (!cursorLocked)
+            {
+                float cursorViewX = (float)manager.currentBeat * oldBeatWidth + content.anchoredPosition.x;
+                float newContentX = cursorViewX - (float)manager.currentBeat * beatWidth;
+                content.anchoredPosition = new Vector2(
+                    Mathf.Min(newContentX, 0),
+                    content.anchoredPosition.y);
+            }
 
             Rebuild();
         }
@@ -126,8 +157,9 @@ public class TimelinePanel : MonoBehaviour
             double newBeat = Math.Max(0, manager.currentBeat + delta);
             manager.SetCurrentBeat(newBeat);
 
-            // Auto-scroll timeline if cursor hits viewport edge
-            EnsureCursorVisible();
+            // Lockedモードでは UpdateCursor が全部やるので不要
+            if (!cursorLocked)
+                EnsureCursorVisible();
         }
     }
 
@@ -139,22 +171,18 @@ public class TimelinePanel : MonoBehaviour
         float beatX = (float)manager.currentBeat * beatWidth;
         float viewX = beatX + content.anchoredPosition.x;
 
-        float maxContentScroll = Mathf.Max(0, content.sizeDelta.x - vpWidth);
-
         if (viewX > vpWidth - cursorMarginRight)
         {
-            // Cursor is too far right — scroll content left
             float newContentX = -(beatX - (vpWidth - cursorMarginRight));
             content.anchoredPosition = new Vector2(
-                Mathf.Clamp(newContentX, -maxContentScroll, 0),
+                Mathf.Min(newContentX, 0),
                 content.anchoredPosition.y);
         }
         else if (viewX < cursorMarginLeft)
         {
-            // Cursor is too far left — scroll content right
             float newContentX = -(beatX - cursorMarginLeft);
             content.anchoredPosition = new Vector2(
-                Mathf.Clamp(newContentX, -maxContentScroll, 0),
+                Mathf.Min(newContentX, 0),
                 content.anchoredPosition.y);
         }
     }
@@ -162,39 +190,114 @@ public class TimelinePanel : MonoBehaviour
     void UpdateCursor()
     {
         if (cursorLine == null) return;
+
+        // currentBeatがコンテンツ範囲を超えたらレイアウト再計算
+        if (manager.currentBeat + 4 > totalBeats)
+            RebuildLayout();
+
         float beatX = (float)manager.currentBeat * beatWidth;
-        float viewX = beatX + content.anchoredPosition.x;
-        cursorLine.anchoredPosition = new Vector2(viewX, 0);
+
+        if (cursorLocked)
+        {
+            float vpWidth = viewport.rect.width;
+            float fixedX = vpWidth * lockedCursorRatio;
+            cursorLine.anchoredPosition = new Vector2(fixedX, 0);
+
+            // コンテンツ幅が足りなければ拡張
+            float requiredWidth = beatX + vpWidth;
+            if (content.sizeDelta.x < requiredWidth)
+                content.sizeDelta = new Vector2(requiredWidth, content.sizeDelta.y);
+
+            float newContentX = -(beatX - fixedX);
+            content.anchoredPosition = new Vector2(
+                Mathf.Min(newContentX, 0),
+                content.anchoredPosition.y);
+        }
+        else
+        {
+            float viewX = beatX + content.anchoredPosition.x;
+            cursorLine.anchoredPosition = new Vector2(viewX, 0);
+
+            float vpWidth = viewport.rect.width;
+            if (vpWidth > 0 && (viewX > vpWidth - cursorMarginRight || viewX < cursorMarginLeft))
+                EnsureCursorVisible();
+        }
+
+        // 可視範囲が変わっていれば再描画
+        RedrawVisible();
     }
 
     // Height reserved for the audio track row above note lanes
     const float audioTrackHeight = 24f;
 
+    // キャッシュ: Rebuildで計算、DrawVisibleで使い回す
+    Dictionary<NoteData, int> cachedLanes = new Dictionary<NoteData, int>();
+    int cachedLaneCount;
+    float cachedAudioRowHeight;
+    float cachedContentHeight;
+    double lastVisibleMinBeat = -1, lastVisibleMaxBeat = -1;
+    bool layoutDirty = true;
+
+    /// <summary>譜面構造が変わったときに呼ぶ。レイアウト再計算 + 可視領域再描画。</summary>
     void Rebuild()
     {
-        for (int i = content.childCount - 1; i >= 0; i--)
-            Destroy(content.GetChild(i).gameObject);
+        layoutDirty = true;
+        RebuildLayout();
+        RedrawVisible(true);
+        UpdateCursor();
+    }
 
+    /// <summary>レイアウト（content幅・レーン割り当て）だけ再計算。</summary>
+    void RebuildLayout()
+    {
         float maxBeat = 16f;
         foreach (var n in manager.chart.notes)
             maxBeat = Mathf.Max(maxBeat, (float)n.hitBeat + 4);
         if (manager.chart.audioTrack != null)
             maxBeat = Mathf.Max(maxBeat,
                 (float)(manager.chart.audioTrack.startBeat + manager.chart.audioTrack.durationBeats) + 2);
+        maxBeat = Mathf.Max(maxBeat, (float)manager.currentBeat + 8);
         totalBeats = Mathf.CeilToInt(maxBeat);
 
-        var lanes = AssignLanes();
-        int laneCount = Mathf.Max(1, lanes.Values.Count > 0 ? lanes.Values.Max() + 1 : 1);
+        cachedLanes = AssignLanes();
+        cachedLaneCount = Mathf.Max(1, cachedLanes.Values.Count > 0 ? cachedLanes.Values.Max() + 1 : 1);
 
         bool hasAudio = manager.chart.audioTrack != null;
-        float audioRowHeight = hasAudio ? audioTrackHeight + lanePadding : 0f;
-        float contentHeight = audioRowHeight + laneCount * (laneHeight + lanePadding) + 20f;
-        content.sizeDelta = new Vector2(totalBeats * beatWidth, contentHeight);
+        cachedAudioRowHeight = hasAudio ? audioTrackHeight + lanePadding : 0f;
+        cachedContentHeight = cachedAudioRowHeight + cachedLaneCount * (laneHeight + lanePadding) + 20f;
+        content.sizeDelta = new Vector2(totalBeats * beatWidth, cachedContentHeight);
 
-        DrawGrid(contentHeight);
-        DrawAudioTrack();
-        DrawNotes(lanes, audioRowHeight);
-        UpdateCursor();
+        layoutDirty = false;
+    }
+
+    /// <summary>ビューポートに見える範囲の要素だけ描画する。</summary>
+    void RedrawVisible(bool force = false)
+    {
+        float vpWidth = viewport.rect.width;
+        if (vpWidth <= 0) return;
+
+        // 可視範囲を拍で計算（余白付き）
+        float contentX = -content.anchoredPosition.x;
+        float margin = beatWidth * 2; // 2拍分の余白
+        double minBeat = (contentX - margin) / beatWidth;
+        double maxBeat = (contentX + vpWidth + margin) / beatWidth;
+
+        // 範囲が大きく変わっていなければスキップ（性能対策）
+        if (!force &&
+            System.Math.Abs(minBeat - lastVisibleMinBeat) < 1.0 &&
+            System.Math.Abs(maxBeat - lastVisibleMaxBeat) < 1.0)
+            return;
+
+        lastVisibleMinBeat = minBeat;
+        lastVisibleMaxBeat = maxBeat;
+
+        // 全子要素を削除して再描画
+        for (int i = content.childCount - 1; i >= 0; i--)
+            Destroy(content.GetChild(i).gameObject);
+
+        DrawGridVisible(cachedContentHeight, minBeat, maxBeat);
+        DrawAudioTrackVisible(minBeat, maxBeat);
+        DrawNotesVisible(cachedLanes, cachedAudioRowHeight, minBeat, maxBeat);
     }
 
     Dictionary<NoteData, int> AssignLanes()
@@ -230,19 +333,22 @@ public class TimelinePanel : MonoBehaviour
         return result;
     }
 
-    void DrawGrid(float contentHeight)
+    void DrawGridVisible(float contentHeight, double minBeat, double maxBeat)
     {
         var measures = TimeSignatureHelper.BuildMeasureList(
             manager.chart.timeSignatures, totalBeats);
 
         foreach (var mi in measures)
         {
+            double measureEnd = mi.startBeat + mi.beatsPerMeasure;
+            // 小節がまるごと可視範囲外ならスキップ
+            if (measureEnd < minBeat) continue;
+            if (mi.startBeat > maxBeat) break;
+
             float mx = (float)mi.startBeat * beatWidth;
 
-            // Measure line (bright)
             MakeGridLine(mx, contentHeight, new Color(1, 1, 1, 0.4f));
 
-            // Measure number label
             var lbl = new GameObject($"Lbl_{mi.measure}");
             var lrt = lbl.AddComponent<RectTransform>();
             lrt.SetParent(content, false);
@@ -257,21 +363,23 @@ public class TimelinePanel : MonoBehaviour
             txt.fontSize = 11;
             txt.color = Color.white;
 
-            // Beat lines within this measure
             int beatCount = mi.timeSignature.numerator;
             double beatUnit = 4.0 / mi.timeSignature.denominator;
             for (int b = 1; b < beatCount; b++)
             {
-                float bx = (float)(mi.startBeat + b * beatUnit) * beatWidth;
+                double bb = mi.startBeat + b * beatUnit;
+                if (bb < minBeat) continue;
+                if (bb > maxBeat) break;
+                float bx = (float)bb * beatWidth;
                 MakeGridLine(bx, contentHeight, new Color(1, 1, 1, 0.15f));
             }
         }
 
-        // Quantize subdivision grid
         if (manager.quantizeEnabled)
         {
             double grid = 4.0 / manager.quantizeDivision;
-            for (double b = grid; b < totalBeats; b += grid)
+            double startGrid = System.Math.Max(grid, System.Math.Floor(minBeat / grid) * grid);
+            for (double b = startGrid; b < maxBeat && b < totalBeats; b += grid)
             {
                 float qx = (float)b * beatWidth;
                 MakeGridLine(qx, contentHeight, new Color(0.5f, 0.8f, 1f, 0.08f));
@@ -292,14 +400,24 @@ public class TimelinePanel : MonoBehaviour
         line.AddComponent<Image>().color = color;
     }
 
-    void DrawAudioTrack()
+    void DrawAudioTrackVisible(double minBeat, double maxBeat)
     {
         var at = manager.chart.audioTrack;
         if (at == null) return;
 
-        float leftX = (float)at.startBeat * beatWidth;
-        float w = (float)at.durationBeats * beatWidth;
-        float topY = -18f; // just below the label row
+        double atStart = at.startBeat;
+        double atEnd = at.startBeat + at.durationBeats;
+
+        // 可視範囲外なら描画しない
+        if (atEnd < minBeat || atStart > maxBeat) return;
+
+        // 可視範囲にクランプして描画
+        double drawStart = System.Math.Max(atStart, minBeat);
+        double drawEnd = System.Math.Min(atEnd, maxBeat);
+
+        float leftX = (float)drawStart * beatWidth;
+        float w = (float)(drawEnd - drawStart) * beatWidth;
+        float topY = -18f;
 
         var block = new GameObject("AudioBlock");
         var rt = block.AddComponent<RectTransform>();
@@ -309,34 +427,38 @@ public class TimelinePanel : MonoBehaviour
         rt.pivot = new Vector2(0, 1);
         rt.anchoredPosition = new Vector2(leftX, topY);
         rt.sizeDelta = new Vector2(w, audioTrackHeight);
-
         block.AddComponent<Image>().color = new Color(0.2f, 0.7f, 0.4f);
 
-        // Label
-        var lbl = new GameObject("Label");
-        var lrt = lbl.AddComponent<RectTransform>();
-        lrt.SetParent(rt, false);
-        lrt.anchorMin = Vector2.zero;
-        lrt.anchorMax = Vector2.one;
-        lrt.offsetMin = new Vector2(4, 0);
-        lrt.offsetMax = new Vector2(-2, 0);
-        var txt = lbl.AddComponent<Text>();
-        txt.text = $"\u266A {at.fileName}";
-        txt.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        txt.fontSize = 11;
-        txt.color = Color.white;
-        txt.alignment = TextAnchor.MiddleLeft;
+        // ラベルはオーディオ左端が見えているときだけ表示
+        if (atStart >= minBeat)
+        {
+            var lbl = new GameObject("Label");
+            var lrt = lbl.AddComponent<RectTransform>();
+            lrt.SetParent(rt, false);
+            lrt.anchorMin = Vector2.zero;
+            lrt.anchorMax = Vector2.one;
+            lrt.offsetMin = new Vector2(4, 0);
+            lrt.offsetMax = new Vector2(-2, 0);
+            var txt = lbl.AddComponent<Text>();
+            txt.text = $"\u266A {at.fileName}";
+            txt.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+            txt.fontSize = 11;
+            txt.color = Color.white;
+            txt.alignment = TextAnchor.MiddleLeft;
+        }
 
         var handler = block.AddComponent<AudioBlockHandler>();
         handler.Init(this);
     }
 
-    void DrawNotes(Dictionary<NoteData, int> lanes, float audioRowOffset = 0f)
+    void DrawNotesVisible(Dictionary<NoteData, int> lanes, float audioRowOffset, double minBeat, double maxBeat)
     {
         foreach (var note in manager.chart.notes)
         {
-            int lane = lanes.ContainsKey(note) ? lanes[note] : 0;
             double spawnBeat = note.hitBeat - note.leadBeat;
+            // 可視範囲外ならスキップ
+            if (note.hitBeat < minBeat || spawnBeat > maxBeat) continue;
+            int lane = lanes.ContainsKey(note) ? lanes[note] : 0;
 
             float leftX = (float)spawnBeat * beatWidth;
             float rightX = (float)note.hitBeat * beatWidth;
@@ -354,8 +476,15 @@ public class TimelinePanel : MonoBehaviour
             rt.sizeDelta = new Vector2(barWidth, laneHeight);
 
             var img = block.AddComponent<Image>();
-            bool sel = note == manager.selectedNote;
-            img.color = sel ? new Color(1f, 0.8f, 0.2f) : ShapeColor(note.shape);
+            bool isCurrent = note == manager.selectedNote;
+            bool isMultiSel = manager.IsSelected(note);
+            img.color = isCurrent ? new Color(1f, 0.8f, 0.2f) : NoteColor(note);
+
+            // Orange selection border for multi-selected notes
+            if (isMultiSel && !isCurrent)
+            {
+                AddSelectionBorder(rt);
+            }
 
             // Hit marker (right edge)
             var hitMark = new GameObject("HitMark");
@@ -377,7 +506,8 @@ public class TimelinePanel : MonoBehaviour
             lrt.offsetMin = new Vector2(2, 0);
             lrt.offsetMax = new Vector2(-2, 0);
             var txt = lbl.AddComponent<Text>();
-            txt.text = $"{note.leadBeat:F1}拍 b{note.hitBeat:F1}";
+            string typePrefix = note.noteType == NoteType.Slash ? "\u2694 " : "";
+            txt.text = $"{typePrefix}{note.leadBeat:F1}拍 b{note.hitBeat:F1}";
             txt.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             txt.fontSize = 11;
             txt.color = Color.black;
@@ -404,7 +534,8 @@ public class TimelinePanel : MonoBehaviour
         double deltaBeat = deltaX / beatWidth;
         double newBeat = Math.Max(0, manager.currentBeat + deltaBeat);
         manager.SetCurrentBeat(newBeat);
-        EnsureCursorVisible();
+        if (!cursorLocked)
+            EnsureCursorVisible();
     }
 
     public DragMode DetectDragMode(RectTransform blockRt, Vector2 screenPos)
@@ -565,9 +696,12 @@ public class TimelinePanel : MonoBehaviour
         if (!isDragging) Rebuild();
     }
 
-    Color ShapeColor(ShapeType s)
+    Color NoteColor(NoteData note)
     {
-        switch (s)
+        if (note.noteType == NoteType.Slash)
+            return new Color(1f, 0.3f, 0.3f); // red for slash
+
+        switch (note.shape)
         {
             case ShapeType.Diameter:  return new Color(0.4f, 0.7f, 1f);
             case ShapeType.Triangle:  return new Color(0.5f, 1f, 0.5f);
@@ -576,6 +710,134 @@ public class TimelinePanel : MonoBehaviour
             case ShapeType.Hexagram:  return new Color(0.8f, 0.4f, 1f);
             default: return Color.gray;
         }
+    }
+
+    void AddSelectionBorder(RectTransform parent)
+    {
+        Color borderCol = new Color(1f, 0.6f, 0f, 0.9f);
+        float thickness = 2f;
+
+        // Top
+        MakeBorderEdge(parent, new Vector2(0, 1), new Vector2(1, 1), new Vector2(0, thickness), borderCol);
+        // Bottom
+        MakeBorderEdge(parent, new Vector2(0, 0), new Vector2(1, 0), new Vector2(0, thickness), borderCol);
+        // Left
+        MakeBorderEdge(parent, new Vector2(0, 0), new Vector2(0, 1), new Vector2(thickness, 0), borderCol);
+        // Right
+        MakeBorderEdge(parent, new Vector2(1, 0), new Vector2(1, 1), new Vector2(thickness, 0), borderCol);
+    }
+
+    void MakeBorderEdge(RectTransform parent, Vector2 anchorMin, Vector2 anchorMax, Vector2 sizeDelta, Color col)
+    {
+        var go = new GameObject("Border");
+        var rt = go.AddComponent<RectTransform>();
+        rt.SetParent(parent, false);
+        rt.anchorMin = anchorMin;
+        rt.anchorMax = anchorMax;
+        rt.sizeDelta = sizeDelta;
+        rt.anchoredPosition = Vector2.zero;
+        var img = go.AddComponent<Image>();
+        img.color = col;
+        img.raycastTarget = false;
+    }
+
+    // ---- Selection rect state ----
+    bool isSelecting;
+    Vector2 selStartContentPos; // content-local position where drag started
+    GameObject selectionRectObj;
+
+    public void OnBgSelectionStart(Vector2 screenPos)
+    {
+        isSelecting = true;
+        isDragging = true;
+        scrollRect.enabled = false;
+
+        // Convert screen pos to content local
+        RectTransformUtility.ScreenPointToLocalPointInRectangle(
+            content, screenPos, null, out selStartContentPos);
+
+        // Create selection rect visual
+        if (selectionRectObj != null) Destroy(selectionRectObj);
+        selectionRectObj = new GameObject("SelectionRect");
+        var rt = selectionRectObj.AddComponent<RectTransform>();
+        rt.SetParent(content, false);
+        rt.anchorMin = new Vector2(0, 1);
+        rt.anchorMax = new Vector2(0, 1);
+        rt.pivot = new Vector2(0, 1);
+        var img = selectionRectObj.AddComponent<Image>();
+        img.color = new Color(1f, 0.6f, 0f, 0.15f);
+        img.raycastTarget = false;
+
+        // Orange border on the selection rect
+        AddSelectionBorder(rt);
+    }
+
+    public void OnBgSelectionDrag(Vector2 screenPos)
+    {
+        if (!isSelecting || selectionRectObj == null) return;
+
+        Vector2 curContentPos;
+        RectTransformUtility.ScreenPointToLocalPointInRectangle(
+            content, screenPos, null, out curContentPos);
+
+        float x = Mathf.Min(selStartContentPos.x, curContentPos.x);
+        float y = Mathf.Max(selStartContentPos.y, curContentPos.y); // y is inverted (top=0)
+        float w = Mathf.Abs(curContentPos.x - selStartContentPos.x);
+        float h = Mathf.Abs(curContentPos.y - selStartContentPos.y);
+
+        var rt = selectionRectObj.GetComponent<RectTransform>();
+        rt.anchoredPosition = new Vector2(x, y);
+        rt.sizeDelta = new Vector2(w, h);
+    }
+
+    public void OnBgSelectionEnd(Vector2 screenPos)
+    {
+        if (!isSelecting) return;
+        isSelecting = false;
+        isDragging = false;
+        scrollRect.enabled = true;
+
+        if (selectionRectObj == null) return;
+
+        Vector2 curContentPos;
+        RectTransformUtility.ScreenPointToLocalPointInRectangle(
+            content, screenPos, null, out curContentPos);
+
+        // Calculate beat range from x coordinates
+        float minX = Mathf.Min(selStartContentPos.x, curContentPos.x);
+        float maxX = Mathf.Max(selStartContentPos.x, curContentPos.x);
+        double minBeatSel = minX / beatWidth;
+        double maxBeatSel = maxX / beatWidth;
+
+        // Calculate lane range from y coordinates
+        float minY = Mathf.Min(selStartContentPos.y, curContentPos.y); // more negative = lower
+        float maxY = Mathf.Max(selStartContentPos.y, curContentPos.y);
+
+        // Find all notes within the rect
+        var selected = new List<NoteData>();
+        foreach (var note in manager.chart.notes)
+        {
+            double spawnBeat = note.hitBeat - note.leadBeat;
+            // Note overlaps if its bar intersects the selection rect horizontally
+            if (note.hitBeat < minBeatSel || spawnBeat > maxBeatSel) continue;
+
+            // Check vertical overlap using lane position
+            int lane = cachedLanes.ContainsKey(note) ? cachedLanes[note] : 0;
+            float noteTop = -(18f + cachedAudioRowHeight + lane * (laneHeight + lanePadding));
+            float noteBottom = noteTop - laneHeight;
+            // maxY/minY are in content local (negative downward from top)
+            if (noteTop < minY || noteBottom > maxY) continue;
+
+            selected.Add(note);
+        }
+
+        Destroy(selectionRectObj);
+        selectionRectObj = null;
+
+        if (selected.Count > 0)
+            manager.SelectNotes(selected);
+        else
+            manager.DeselectNote();
     }
 }
 
@@ -663,24 +925,59 @@ public class AudioBlockHandler : MonoBehaviour,
 }
 
 public class TimelineBgDragHandler : MonoBehaviour,
-    IBeginDragHandler, IDragHandler, IEndDragHandler
+    IBeginDragHandler, IDragHandler, IEndDragHandler, IPointerClickHandler
 {
     TimelinePanel panel;
+    bool shiftDragMode; // true = cursor drag, false = selection rect
     Vector2 lastDragPos;
 
     public void Init(TimelinePanel p) { panel = p; }
 
+    public void OnPointerClick(PointerEventData eventData)
+    {
+        // Click on empty area deselects
+        if (!eventData.dragging)
+            panel.manager.DeselectNote();
+    }
+
     public void OnBeginDrag(PointerEventData eventData)
     {
-        lastDragPos = eventData.position;
+        var kb = Keyboard.current;
+        shiftDragMode = kb != null && kb.shiftKey.isPressed;
+
+        if (shiftDragMode)
+        {
+            lastDragPos = eventData.position;
+        }
+        else
+        {
+            panel.OnBgSelectionStart(eventData.position);
+        }
     }
 
     public void OnDrag(PointerEventData eventData)
     {
-        float dx = eventData.position.x - lastDragPos.x;
-        lastDragPos = eventData.position;
-        panel.OnBgDrag(dx);
+        if (shiftDragMode)
+        {
+            float dx = eventData.position.x - lastDragPos.x;
+            lastDragPos = eventData.position;
+            panel.OnBgDrag(dx);
+        }
+        else
+        {
+            panel.OnBgSelectionDrag(eventData.position);
+        }
     }
 
-    public void OnEndDrag(PointerEventData eventData) { }
+    public void OnEndDrag(PointerEventData eventData)
+    {
+        if (shiftDragMode)
+        {
+            // nothing special to clean up
+        }
+        else
+        {
+            panel.OnBgSelectionEnd(eventData.position);
+        }
+    }
 }

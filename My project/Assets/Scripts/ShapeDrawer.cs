@@ -26,43 +26,26 @@ public class ShapeDrawer : MonoBehaviour
         line.positionCount = 0;
     }
 
-    /// <summary>progress(0→1) のところまで一筆書きで描く。</summary>
+    /// <summary>progress(0→1) のところまで一筆書きで描く。
+    /// セグメント単位でスナップするので、拍ごとに辺がパッと現れる。</summary>
     public void Draw(float progress)
     {
         if (shape == null || shape.Length < 2) return;
         progress = Mathf.Clamp01(progress);
 
-        // 全体の道のりを測る
-        float total = 0f;
-        var seg = new float[shape.Length - 1];
-        for (int i = 0; i < shape.Length - 1; i++)
+        // セグメント数に合わせて量子化（例: 三角形なら 0, 1/3, 2/3, 1 にスナップ）
+        int segments = shape.Length - 1;
+        int completed = Mathf.FloorToInt(progress * segments);
+        if (completed >= segments) completed = segments; // progress==1 のとき全辺
+
+        if (completed <= 0)
         {
-            seg[i] = Vector2.Distance(shape[i], shape[i + 1]);
-            total += seg[i];
+            line.positionCount = 0;
+            return;
         }
 
-        float target = total * progress; // ここまで描く
-        var pts = new List<Vector3> { (Vector3)(shape[0] * radius) };
-        float acc = 0f;
-
-        for (int i = 0; i < seg.Length; i++)
-        {
-            if (acc + seg[i] <= target)
-            {
-                pts.Add((Vector3)(shape[i + 1] * radius));
-                acc += seg[i];
-            }
-            else
-            {
-                // 線分の途中で打ち切る
-                float t = seg[i] > 0 ? (target - acc) / seg[i] : 0f;
-                Vector2 mid = Vector2.Lerp(shape[i], shape[i + 1], t);
-                pts.Add((Vector3)(mid * radius));
-                break;
-            }
-        }
-
-        line.positionCount = pts.Count;
-        line.SetPositions(pts.ToArray());
+        line.positionCount = completed + 1;
+        for (int i = 0; i <= completed; i++)
+            line.SetPosition(i, (Vector3)(shape[i] * radius));
     }
 }

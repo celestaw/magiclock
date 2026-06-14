@@ -26,6 +26,24 @@ public static class ChartFileIO
         return JsonUtility.FromJson<Chart>(json);
     }
 
+    public static void SaveToPath(Chart chart, string fullPath)
+    {
+        string json = JsonUtility.ToJson(chart, true);
+        File.WriteAllText(fullPath, json);
+        Debug.Log($"Chart saved: {fullPath}");
+    }
+
+    public static Chart LoadFromPath(string fullPath)
+    {
+        if (!File.Exists(fullPath))
+        {
+            Debug.LogWarning($"Chart not found: {fullPath}");
+            return null;
+        }
+        string json = File.ReadAllText(fullPath);
+        return JsonUtility.FromJson<Chart>(json);
+    }
+
     public static string[] ListFiles()
     {
         if (!Directory.Exists(ChartsDir)) return new string[0];

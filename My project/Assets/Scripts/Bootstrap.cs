@@ -44,7 +44,7 @@ public class Bootstrap : MonoBehaviour
         var poolGo = new GameObject("NotePool");
         poolGo.SetActive(false);
         var pool = poolGo.AddComponent<NotePool>();
-        pool.prefab = template;
+        pool.magicCirclePrefab = template;
         pool.initialSize = 16;
         poolGo.SetActive(true);
 
@@ -81,7 +81,10 @@ public class Bootstrap : MonoBehaviour
         var go = new GameObject("Canvas");
         var canvas = go.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        go.AddComponent<CanvasScaler>();
+        var scaler = go.AddComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1920, 1080);
+        scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.Shrink;
         go.AddComponent<GraphicRaycaster>();
         return canvas;
     }

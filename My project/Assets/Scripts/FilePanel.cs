@@ -5,14 +5,17 @@ public class FilePanel : MonoBehaviour
 {
     public ChartEditorManager manager;
     public EditorPlayback playback;
+    public TimelinePanel timeline;
 
-    InputField fileNameInput, bpmInput;
-    Dropdown loadDropdown;
+    InputField bpmInput;
+    GameObject fileMenu;
+    string lastSavePath; // overwrite save path
 
-    public void Init(ChartEditorManager mgr, EditorPlayback pb, RectTransform parent)
+    public void Init(ChartEditorManager mgr, EditorPlayback pb, RectTransform parent, TimelinePanel tl = null)
     {
         manager = mgr;
         playback = pb;
+        timeline = tl;
 
         var rt = gameObject.GetComponent<RectTransform>();
         rt.SetParent(parent, false);
@@ -25,48 +28,19 @@ public class FilePanel : MonoBehaviour
 
         float x = 10;
 
-        // File name
-        fileNameInput = MakeInputField(rt, ref x, 140, "MyChart");
-        x += 5;
-
-        // Save
-        var saveBtn = MakeButton(rt, ref x, 60, "Save");
-        saveBtn.onClick.AddListener(() =>
-        {
-            string name = fileNameInput.text.Trim();
-            if (string.IsNullOrEmpty(name)) name = "MyChart";
-            ChartFileIO.Save(manager.chart, name);
-            RefreshLoadDropdown();
-        });
-        x += 5;
-
-        // Load dropdown
-        loadDropdown = MakeDropdown(rt, ref x, 140);
-        x += 5;
-
-        // Load button
-        var loadBtn = MakeButton(rt, ref x, 60, "Load");
-        loadBtn.onClick.AddListener(() =>
-        {
-            if (loadDropdown.options.Count == 0) return;
-            string name = loadDropdown.options[loadDropdown.value].text;
-            var chart = ChartFileIO.Load(name);
-            if (chart != null)
-            {
-                manager.LoadChart(chart);
-                fileNameInput.text = name;
-                bpmInput.text = chart.bpm.ToString("F1");
-            }
-        });
+        // File menu button
+        var fileBtn = MakeButton(rt, ref x, 65, "File");
+        fileBtn.GetComponent<Image>().color = new Color(0.2f, 0.2f, 0.28f);
+        fileBtn.onClick.AddListener(ToggleFileMenu);
         x += 15;
 
         // BPM
         MakeLabel(rt, ref x, 35, "BPM:");
-        bpmInput = MakeInputField(rt, ref x, 60, manager.chart.bpm.ToString("F1"));
+        bpmInput = MakeInputField(rt, ref x, 85, manager.chart.bpm.ToString("F3"));
         bpmInput.onEndEdit.AddListener(v =>
         {
             if (float.TryParse(v, out float bpm) && bpm > 0)
-                manager.chart.bpm = bpm;
+                manager.SetBpmAtMeasure(0, bpm);
         });
         x += 15;
 
@@ -77,36 +51,252 @@ public class FilePanel : MonoBehaviour
         // Stop
         var stopBtn = MakeButton(rt, ref x, 50, "Stop");
         stopBtn.onClick.AddListener(() => playback.Stop());
-        x += 15;
+        x += 5;
 
-        // Audio file open
-        var audioBtn = MakeButton(rt, ref x, 70, "Audio...");
-        audioBtn.onClick.AddListener(() =>
+        // Metronome toggle
+        var metBtn = MakeButton(rt, ref x, 50, "Met");
+        var metBtnImg = metBtn.GetComponent<Image>();
+        metBtnImg.color = new Color(0.3f, 0.3f, 0.4f);
+        metBtn.onClick.AddListener(() =>
         {
-            string path = FileDialogHelper.OpenAudioFileDialog();
-            if (string.IsNullOrEmpty(path)) return;
-            string fileName = System.IO.Path.GetFileName(path);
-            Debug.Log($"Loading audio: {path}");
-            StartCoroutine(AudioImporter.LoadClipFromPath(path, fileName, clip =>
-            {
-                if (clip == null) { Debug.LogError("AudioClip load returned null"); return; }
-                Debug.Log($"Audio loaded: {clip.name}, length={clip.length}s");
-                manager.SetAudioTrack(clip, fileName, manager.chart.bpm);
-                if (playback.conductor != null && playback.conductor.audioSource != null)
-                    playback.conductor.audioSource.clip = clip;
-            }));
+            var cond = playback.conductor;
+            if (cond == null) return;
+            cond.metronomeEnabled = !cond.metronomeEnabled;
+            metBtnImg.color = cond.metronomeEnabled
+                ? new Color(0.2f, 0.7f, 0.3f)
+                : new Color(0.3f, 0.3f, 0.4f);
         });
+        x += 5;
 
-        RefreshLoadDropdown();
+        // Cursor lock toggle
+        var lockBtn = MakeButton(rt, ref x, 50, "Lock");
+        var lockBtnImg = lockBtn.GetComponent<Image>();
+        lockBtnImg.color = new Color(0.3f, 0.3f, 0.4f);
+        lockBtn.onClick.AddListener(() =>
+        {
+            if (timeline == null) return;
+            timeline.cursorLocked = !timeline.cursorLocked;
+            lockBtnImg.color = timeline.cursorLocked
+                ? new Color(0.2f, 0.7f, 0.3f)
+                : new Color(0.3f, 0.3f, 0.4f);
+        });
     }
 
-    void RefreshLoadDropdown()
+    // ---- File dropdown menu ----
+
+    void ToggleFileMenu()
     {
-        loadDropdown.ClearOptions();
-        foreach (var f in ChartFileIO.ListFiles())
-            loadDropdown.options.Add(new Dropdown.OptionData(f));
-        loadDropdown.RefreshShownValue();
+        if (fileMenu != null) { DismissFileMenu(); return; }
+        ShowFileMenu();
     }
+
+    void ShowFileMenu()
+    {
+        DismissFileMenu();
+
+        var panelRt = gameObject.GetComponent<RectTransform>();
+
+        fileMenu = new GameObject("FileMenu");
+        var rt = fileMenu.AddComponent<RectTransform>();
+        rt.SetParent(panelRt, false);
+        rt.anchorMin = new Vector2(0, 0);
+        rt.anchorMax = new Vector2(0, 0);
+        rt.pivot = new Vector2(0, 1);
+        rt.anchoredPosition = new Vector2(10, -2);
+        rt.sizeDelta = new Vector2(160, 190);
+
+        var bg = fileMenu.AddComponent<Image>();
+        bg.color = new Color(0.18f, 0.18f, 0.25f);
+
+        // Build menu items without ref parameter (avoids lambda capture issues)
+        BuildMenuItems(rt);
+    }
+
+    void BuildMenuItems(RectTransform parent)
+    {
+        float y = -5;
+
+        // Save (overwrite)
+        AddMenuItem(parent, y, "Save (Ctrl+S)", OnSaveOverwrite);
+        y -= 30;
+
+        // Save As...
+        AddMenuItem(parent, y, "Save As...", OnSaveAs);
+        y -= 30;
+
+        // Open...
+        AddMenuItem(parent, y, "Open...", OnOpen);
+        y -= 30;
+
+        // Audio...
+        AddMenuItem(parent, y, "Audio...", OnAudio);
+        y -= 30;
+
+        // New
+        AddMenuItem(parent, y, "New", OnNew);
+    }
+
+    void OnSaveOverwrite()
+    {
+        DismissFileMenu();
+        if (!string.IsNullOrEmpty(lastSavePath))
+        {
+            ChartFileIO.SaveToPath(manager.chart, lastSavePath);
+            Debug.Log($"Saved: {lastSavePath}");
+        }
+        else
+        {
+            OnSaveAs(); // no path yet, fall back to Save As
+        }
+    }
+
+    void OnSaveAs()
+    {
+        DismissFileMenu();
+        string path = FileDialogHelper.SaveChartFileDialog("chart");
+        if (string.IsNullOrEmpty(path)) return;
+        lastSavePath = path;
+        ChartFileIO.SaveToPath(manager.chart, path);
+        Debug.Log($"Saved: {path}");
+    }
+
+    void OnOpen()
+    {
+        DismissFileMenu();
+        string path = FileDialogHelper.OpenChartFileDialog();
+        if (string.IsNullOrEmpty(path)) return;
+        var chart = ChartFileIO.LoadFromPath(path);
+        if (chart == null) return;
+        lastSavePath = path;
+        manager.LoadChart(chart);
+        bpmInput.text = chart.bpm.ToString("F3");
+        Debug.Log($"Loaded: {path}");
+        TryReloadAudio(chart);
+    }
+
+    void OnAudio()
+    {
+        DismissFileMenu();
+        string path = FileDialogHelper.OpenAudioFileDialog();
+        if (string.IsNullOrEmpty(path)) return;
+        LoadAudioFromPath(path);
+    }
+
+    void OnNew()
+    {
+        DismissFileMenu();
+        lastSavePath = null;
+        manager.LoadChart(new Chart());
+        bpmInput.text = manager.chart.bpm.ToString("F3");
+    }
+
+    void AddMenuItem(RectTransform parent, float y, string label, System.Action onClick)
+    {
+        var go = new GameObject($"MenuItem_{label}");
+        var rt = go.AddComponent<RectTransform>();
+        rt.SetParent(parent, false);
+        rt.anchorMin = new Vector2(0, 1);
+        rt.anchorMax = new Vector2(1, 1);
+        rt.pivot = new Vector2(0, 1);
+        rt.anchoredPosition = new Vector2(4, y);
+        rt.sizeDelta = new Vector2(-8, 28);
+
+        var img = go.AddComponent<Image>();
+        img.color = new Color(0.25f, 0.25f, 0.32f);
+
+        var btn = go.AddComponent<Button>();
+        btn.targetGraphic = img;
+        var colors = btn.colors;
+        colors.highlightedColor = new Color(0.35f, 0.35f, 0.45f);
+        btn.colors = colors;
+        btn.onClick.AddListener(() => onClick());
+
+        var lblGo = new GameObject("Lbl");
+        var lrt = lblGo.AddComponent<RectTransform>();
+        lrt.SetParent(rt, false);
+        lrt.anchorMin = Vector2.zero;
+        lrt.anchorMax = Vector2.one;
+        lrt.offsetMin = new Vector2(8, 0);
+        lrt.offsetMax = Vector2.zero;
+        var txt = lblGo.AddComponent<Text>();
+        txt.text = label;
+        txt.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        txt.fontSize = 13;
+        txt.color = Color.white;
+        txt.alignment = TextAnchor.MiddleLeft;
+    }
+
+    void DismissFileMenu()
+    {
+        if (fileMenu != null)
+        {
+            Destroy(fileMenu);
+            fileMenu = null;
+        }
+    }
+
+    void Update()
+    {
+        // Click outside to dismiss file menu
+        if (fileMenu != null)
+        {
+            var mouse = UnityEngine.InputSystem.Mouse.current;
+            if (mouse != null && mouse.leftButton.wasPressedThisFrame)
+            {
+                var rt = fileMenu.GetComponent<RectTransform>();
+                Vector2 local;
+                RectTransformUtility.ScreenPointToLocalPointInRectangle(
+                    rt, mouse.position.ReadValue(), null, out local);
+                if (!rt.rect.Contains(local))
+                    DismissFileMenu();
+            }
+        }
+
+        // Ctrl+S: overwrite save
+        var kb = UnityEngine.InputSystem.Keyboard.current;
+        if (kb != null && kb.ctrlKey.isPressed && kb.sKey.wasPressedThisFrame)
+            OnSaveOverwrite();
+    }
+
+    // ---- Audio loading ----
+
+    void LoadAudioFromPath(string path)
+    {
+        string fileName = System.IO.Path.GetFileName(path);
+        StartCoroutine(AudioImporter.LoadClipFromPath(path, fileName, clip =>
+        {
+            if (clip == null) { Debug.LogError("AudioClip load returned null"); return; }
+            manager.SetAudioTrack(clip, fileName, manager.chart.bpm);
+            if (manager.chart.audioTrack != null)
+                manager.chart.audioTrack.filePath = path;
+            if (playback.conductor != null && playback.conductor.audioSource != null)
+                playback.conductor.audioSource.clip = clip;
+        }));
+    }
+
+    void TryReloadAudio(Chart chart)
+    {
+        if (chart.audioTrack == null) return;
+
+        string path = chart.audioTrack.filePath;
+        if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path))
+        {
+            Debug.LogWarning($"Audio file not found: {path}");
+            return;
+        }
+
+        string fileName = chart.audioTrack.fileName;
+        StartCoroutine(AudioImporter.LoadClipFromPath(path, fileName, clip =>
+        {
+            if (clip == null) { Debug.LogError("AudioClip reload returned null"); return; }
+            manager.audioClip = clip;
+            if (playback.conductor != null && playback.conductor.audioSource != null)
+                playback.conductor.audioSource.clip = clip;
+            Debug.Log($"Audio reloaded: {path}");
+        }));
+    }
+
+    // ---- UI helpers ----
 
     InputField MakeInputField(RectTransform parent, ref float x, float w, string defaultText)
     {
@@ -187,92 +377,5 @@ public class FilePanel : MonoBehaviour
         t.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
         t.fontSize = 13;
         t.color = Color.white;
-    }
-
-    Dropdown MakeDropdown(RectTransform parent, ref float x, float w)
-    {
-        var go = new GameObject("LoadDD");
-        var rt = go.AddComponent<RectTransform>();
-        rt.SetParent(parent, false);
-        rt.anchorMin = new Vector2(0, 0.5f);
-        rt.anchorMax = new Vector2(0, 0.5f);
-        rt.pivot = new Vector2(0, 0.5f);
-        rt.anchoredPosition = new Vector2(x, 0);
-        rt.sizeDelta = new Vector2(w, 28);
-        x += w;
-
-        go.AddComponent<Image>().color = new Color(0.25f, 0.25f, 0.3f);
-
-        // Label
-        var lblGo = new GameObject("Label");
-        var lrt = lblGo.AddComponent<RectTransform>();
-        lrt.SetParent(rt, false);
-        lrt.anchorMin = Vector2.zero;
-        lrt.anchorMax = Vector2.one;
-        lrt.offsetMin = new Vector2(4, 0);
-        lrt.offsetMax = new Vector2(-20, 0);
-        var lblTxt = lblGo.AddComponent<Text>();
-        lblTxt.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        lblTxt.fontSize = 13;
-        lblTxt.color = Color.white;
-
-        // Template
-        var tmplGo = new GameObject("Template");
-        var tmplRt = tmplGo.AddComponent<RectTransform>();
-        tmplRt.SetParent(rt, false);
-        tmplRt.anchorMin = new Vector2(0, 0);
-        tmplRt.anchorMax = new Vector2(1, 0);
-        tmplRt.pivot = new Vector2(0.5f, 1);
-        tmplRt.anchoredPosition = Vector2.zero;
-        tmplRt.sizeDelta = new Vector2(0, 120);
-        tmplGo.AddComponent<Image>().color = new Color(0.2f, 0.2f, 0.25f);
-        var scroll = tmplGo.AddComponent<ScrollRect>();
-
-        var vpGo = new GameObject("Viewport");
-        var vpRt = vpGo.AddComponent<RectTransform>();
-        vpRt.SetParent(tmplRt, false);
-        vpRt.anchorMin = Vector2.zero;
-        vpRt.anchorMax = Vector2.one;
-        vpRt.offsetMin = vpRt.offsetMax = Vector2.zero;
-        vpGo.AddComponent<Image>();
-        vpGo.AddComponent<Mask>().showMaskGraphic = true;
-        scroll.viewport = vpRt;
-
-        var contentGo = new GameObject("Content");
-        var contentRt = contentGo.AddComponent<RectTransform>();
-        contentRt.SetParent(vpRt, false);
-        contentRt.anchorMin = new Vector2(0, 1);
-        contentRt.anchorMax = new Vector2(1, 1);
-        contentRt.pivot = new Vector2(0.5f, 1);
-        contentRt.sizeDelta = new Vector2(0, 25);
-        scroll.content = contentRt;
-
-        var itemGo = new GameObject("Item");
-        var itemRt = itemGo.AddComponent<RectTransform>();
-        itemRt.SetParent(contentRt, false);
-        itemRt.anchorMin = new Vector2(0, 0.5f);
-        itemRt.anchorMax = new Vector2(1, 0.5f);
-        itemRt.sizeDelta = new Vector2(0, 25);
-        itemGo.AddComponent<Toggle>();
-
-        var itemLblGo = new GameObject("Item Label");
-        var itemLblRt = itemLblGo.AddComponent<RectTransform>();
-        itemLblRt.SetParent(itemRt, false);
-        itemLblRt.anchorMin = Vector2.zero;
-        itemLblRt.anchorMax = Vector2.one;
-        itemLblRt.offsetMin = new Vector2(4, 0);
-        itemLblRt.offsetMax = new Vector2(-4, 0);
-        var itemTxt = itemLblGo.AddComponent<Text>();
-        itemTxt.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        itemTxt.fontSize = 13;
-        itemTxt.color = Color.white;
-
-        tmplGo.SetActive(false);
-
-        var dd = go.AddComponent<Dropdown>();
-        dd.template = tmplRt;
-        dd.captionText = lblTxt;
-        dd.itemText = itemTxt;
-        return dd;
     }
 }
